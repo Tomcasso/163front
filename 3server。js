@@ -1,0 +1,122 @@
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import OpenAI from "openai";
+
+dotenv.config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// 通义（OpenAI 兼容）
+// 北京地域 base_url（官方文档）
+const client = new OpenAI({
+  apiKey: process.env.DASHSCOPE_API_KEY,
+  baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+});
+
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// 前端把 messages 发来：[{from:'user'|'agent', text:'...'}]
+// 我们转换成 OpenAI 兼容的 messages：[{role:'user'|'assistant', content:'...'}]
+app.post("/api/chat", async (req, res) => {
+  try {
+    const { messages = [] } = req.body;
+
+    const chatMessages = [
+      { role: "system", content: "你是一个专业、简洁的邮箱秘书助手。中文回答。" },
+      ...messages.map((m) => ({
+        role: m.from === "user" ? "user" : "assistant",
+        content: String(m.text ?? ""),
+      })),
+    ];
+
+    const r = await client.chat.completions.create({
+      model: "qwen-plus",
+      messages: chatMessages,
+      temperature: 0.7,
+    });
+
+    const reply = r.choices?.[0]?.message?.content ?? "（无回复）";
+    res.json({ reply });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "调用通义失败" });
+  }
+});
+
+// 生成左侧历史标题：看整段对话（user+assistant），6~10字
+app.post("/api/title", async (req, res) => {
+  try {
+    const { messages = [] } = req.body;
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.json({ title: "新会话" });
+    }
+
+    // 把整段对话组织成“对话记录”，更利于模型总结
+    const transcript = messages
+      .map((m) => {
+        const role = m.from === "user" ? "用户" : "助手";
+        const text = String(m.text ?? "").trim();
+        return text ? `${role}：${text}` : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+
+    const prompt = `
+你是“对话标题生成器”。请阅读下面这段对话记录，为它生成一个中文短标题。
+
+要求：
+- 6~10个字（尽量名词短语）
+- 不能使用“你好/您好/在吗/哈喽/嗨”等问候语作为标题
+- 不要带引号、不要句号、不要换行
+- 不要输出“标题：”前缀
+- 只输出标题本身
+
+对话记录：
+${transcript}
+`.trim();
+
+    const r = await client.chat.completions.create({
+      model: "qwen-plus",
+      messages: [
+        { role: "system", content: "你输出必须严格遵守格式要求。" },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.2,
+      max_tokens: 32
+    });
+
+    let title = (r.choices?.[0]?.message?.content || "")
+      .replace(/[\r\n]/g, " ")
+      .replace(/^标题[:：]\s*/g, "")
+      .trim();
+
+    // 二次防呆：如果还是很短/是问候语，就用更好的兜底（不要回到“你好”）
+    if (!title || title.length < 2 || /^(你好|您好|哈喽|在吗|嗨|hello|hi)$/i.test(title)) {
+      // 兜底：从用户消息里找“最长的一句”截断当标题（比第一句强很多）
+      const userTexts = messages
+        .filter(m => m.from === "user")
+        .map(m => String(m.text ?? "").trim())
+        .filter(Boolean);
+
+      const longest = userTexts.sort((a, b) => b.length - a.length)[0] || "新会话";
+      title = longest.length > 10 ? longest.slice(0, 10) + "…" : longest;
+    }
+
+    // 最终再截断一下，避免太长
+    if (title.length > 12) title = title.slice(0, 12) + "…";
+
+    res.json({ title });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "生成标题失败" });
+  }
+});
+
+
+
+const port = Number(process.env.PORT || 3001);
+app.listen(port, () => console.log(`Backend running: http://localhost:${port}`));
