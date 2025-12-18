@@ -1,0 +1,308 @@
+<template>
+  <div id="app">
+    <div class="container">
+      <!-- 左侧边栏 -->
+      <div class="sidebar">
+        <button @click="startNewChat" class="new-chat-btn">+ 新聊天</button>
+
+        <div class="history">
+          <p class="history-title">您的聊天</p>
+          <ul class="history-list">
+            <li v-for="(chat, index) in chats" :key="index" class="history-item">
+              <p class="history-item-text">{{ chat.title }}</p>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 右侧聊天区域 -->
+      <div class="chat-area">
+        <!-- 会话记录（只滚动它自己） -->
+        <div class="chat-history">
+          <div class="chat-inner">
+            <p v-if="isNewChat" class="welcome-message">
+              老板好，我是邮箱秘书，您可以立即开始跟我聊天
+            </p>
+
+            <div
+              v-for="(message, index) in messages"
+              :key="index"
+              class="message-row"
+              :class="message.from"
+            >
+              <div class="bubble">
+                {{ message.text }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 输入框（固定在右下，不随滚动变化） -->
+        <div class="input-area">
+          <div class="input-wrap">
+            <textarea
+              v-model="userMessage"
+              class="input-box"
+              placeholder="在这里输入消息（Enter 发送，Shift+Enter 换行）"
+              @keydown.enter.exact.prevent="sendMessage"
+              @keydown.enter.shift.stop
+            ></textarea>
+
+            <button @click="sendMessage" class="send-btn" aria-label="发送">
+              <!-- 箭头图标（SVG） -->
+              <svg viewBox="0 0 24 24" class="send-icon" aria-hidden="true">
+                <path
+                  d="M4 12l16-8-4 16-4-6-8-2z"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+export default {
+  data() {
+    return {
+      isNewChat: true,
+      userMessage: '',
+      messages: [],
+      chats: [
+        { title: '老板1', id: 1 },
+        { title: '老板2', id: 2 }
+      ]
+    };
+  },
+  methods: {
+    startNewChat() {
+      this.isNewChat = true;
+      this.messages = [];
+      this.userMessage = '';
+    },
+    sendMessage() {
+      if (this.userMessage.trim()) {
+        this.messages.push({ text: this.userMessage, from: 'user' });
+        this.userMessage = '';
+        this.isNewChat = false;
+
+        this.messages.push({ text: '我已经收到您的消息', from: 'agent' });
+
+        // 可选：自动滚到底部（更像聊天）
+        this.$nextTick(() => {
+          const el = this.$el.querySelector('.chat-history');
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      }
+    }
+  }
+};
+</script>
+
+<style scoped>
+/* 关键：让页面不整体滚动 */
+#app,
+.container {
+  height: 100vh;
+}
+.container {
+  display: flex;
+  width: 100%;
+  overflow: hidden; /* 防止整个页面一起滑动 */
+  background-color: #e6ede9;
+}
+
+/* 左侧边栏：独立滚动 */
+.sidebar {
+  width: 300px;
+  background-color: #e4f1eb;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto; /* 左侧只滚动自己 */
+}
+
+.new-chat-btn {
+  background-color: #4c7854;
+  border: none;
+  padding: 12px;
+  width: 100%;
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+
+.history-title {
+  font-weight: 700;
+  margin: 6px 0 10px;
+}
+
+.history-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.history-item {
+  padding: 10px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.history-item:hover {
+  background: rgba(255, 255, 255, 0.55);
+}
+.history-item-text {
+  margin: 0;
+}
+
+/* 右侧聊天区域：不滚动整个区域，只有 chat-history 滚 */
+.chat-area {
+  flex: 1;
+  position: relative;
+  background-color: #ffffff;
+  overflow: hidden;
+  padding: 20px 20px 0;
+}
+
+/* 聊天展示框：独立滚动 */
+.chat-history {
+  height: calc(100vh - 20px - 110px); /* 顶部padding(20) + 输入区高度(约110) */
+  overflow-y: auto;
+  padding: 18px 0 18px;
+}
+
+/* 中间内容区域（你要的“只占中间位置”） */
+.chat-inner {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: 0 6px;
+}
+
+/* 欢迎语 */
+.welcome-message {
+  font-size: 16px;
+  color: #555;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin: 6px 0 18px;
+}
+
+/* 每条消息一行：根据 user/agent 控制左右 */
+.message-row {
+  display: flex;
+  margin: 10px 0;
+}
+
+.message-row.user {
+  justify-content: flex-end;
+}
+.message-row.agent {
+  justify-content: flex-start;
+}
+
+/* 气泡：类似 ChatGPT/微信，圆角包住文字 */
+.bubble {
+  max-width: 70%;
+  padding: 12px 14px;
+  border-radius: 18px;
+  line-height: 1.5;
+  font-size: 14px;
+  word-break: break-word;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+}
+
+/* 不同角色不同底色（你也可以换成更 ChatGPT 的灰色系） */
+.message-row.user .bubble {
+  background: #dff2ff;
+  border: 1px solid rgba(0,0,0,0.06);
+}
+.message-row.agent .bubble {
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,0.06);
+}
+
+/* 输入区：固定在右侧区域底部，不随聊天滚动 */
+.input-area {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none; /* 让外层不挡住滚动，内部再开启 */
+}
+
+/* 输入框容器：按钮在内部靠右 */
+.input-wrap {
+  width: min(760px, 100%);
+  position: relative;
+  padding: 0 6px;
+  pointer-events: auto;
+}
+
+/* 白色输入框：更高、更窄；placeholder 贴顶部 */
+.input-box {
+  width: 100%;
+  height: 92px;                 /* 高一点（你想更高就改这里） */
+  padding: 12px 56px 12px 14px; /* 右侧留按钮空间 */
+  border: 1px solid rgba(0,0,0,0.15);
+  border-radius: 18px;
+  font-size: 14px;
+  background: #fff;
+  box-sizing: border-box;
+  outline: none;
+
+  resize: none;                 /* 不要拖拽改变尺寸 */
+  line-height: 1.5;
+  vertical-align: top;
+}
+
+/* 让 placeholder 更贴顶部、更像你要的 */
+.input-box::placeholder {
+  color: rgba(0,0,0,0.45);
+}
+
+/* 发送按钮：明显、带箭头，放在白色输入框内部 */
+.send-btn {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+
+  border: none;
+  cursor: pointer;
+
+  background: #4c7854;          /* 明显按钮 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+}
+
+.send-btn:active {
+  transform: translateY(1px);
+}
+
+.send-icon {
+  width: 22px;
+  height: 22px;
+  fill: #fff;
+}
+</style>
+<style>
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden; /* 禁止页面整体滚动 */
+}
+</style>
