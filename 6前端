@@ -1,0 +1,529 @@
+<template>
+  <div id="app">
+    <div class="container">
+      <!-- 左侧边栏 -->
+      <div class="sidebar">
+        <button @click="startNewChat" class="new-chat-btn">+ 新聊天</button>
+
+        <div class="history">
+          <p class="history-title">您的聊天</p>
+          <ul class="history-list">
+            <li
+              v-for="chat in chats"
+              :key="chat.id"
+              class="history-item"
+              :class="{ active: chat.id === activeChatId }"
+              @click="selectChat(chat)"
+            >
+              <p class="history-item-text">{{ chat.title }}</p>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 右侧聊天区域 -->
+      <div class="chat-area">
+        <!-- 会话记录（只滚动它自己） -->
+        <div class="chat-history">
+          <div class="chat-inner">
+            <p v-if="isNewChat" class="welcome-message">
+              老板好，我是邮箱秘书，您可以立即开始跟我聊天
+            </p>
+
+            <div
+              v-for="(message, index) in messages"
+              :key="index"
+              class="message-row"
+              :class="message.from"
+            >
+              <div class="bubble">
+                {{ message.text }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 输入框（固定在右下，不随滚动变化） -->
+        <div class="input-area">
+          <div class="input-wrap">
+            <textarea
+              v-model="userMessage"
+              class="input-box"
+              placeholder="在这里输入消息（Enter 发送，Shift+Enter 换行）"
+              @keydown.enter.exact.prevent="sendMessage"
+              @keydown.enter.shift.stop
+            ></textarea>
+
+            <button @click="sendMessage" class="send-btn" aria-label="发送">
+              <svg viewBox="0 0 24 24" class="send-icon" aria-hidden="true">
+                <path d="M4 12l16-8-4 16-4-6-8-2z" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <!-- /chat-area -->
+    </div>
+  </div>
+</template>
+
+<script>
+export default {
+  data() {
+    return {
+      apiBase: "http://localhost:3001",
+
+      isNewChat: true,
+      userMessage: "",
+      messages: [],
+
+      chats: [],            // 左侧会话列表（从数据库读）
+      activeChatId: null,   // 当前会话 id（数据库的 id）
+
+      // 防止频繁保存（简单锁）
+      saving: false,
+      pendingSave: false,
+    };
+  },
+
+  async created() {
+    await this.loadChats();
+  },
+
+  methods: {
+    /* =========================
+       DB：加载左侧会话列表
+    ========================= */
+    async loadChats() {
+      try {
+        const resp = await fetch(`${this.apiBase}/api/chats`);
+        const data = await resp.json();
+        if (resp.ok && Array.isArray(data.chats)) {
+          this.chats = data.chats;
+        }
+      } catch (e) {
+        // eslint 不允许空块：这里不影响功能，开发时可打开
+        // console.warn("loadChats failed:", e);
+      }
+    },
+
+    /* =========================
+       标题生成（沿用你原来的逻辑）
+    ========================= */
+    async genTitleByMessages(messages) {
+      if (!Array.isArray(messages) || messages.length === 0) return "新会话";
+      try {
+        const resp = await fetch(`${this.apiBase}/api/title`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.title) return data.title;
+      } catch (e) {
+        // console.warn("genTitle failed:", e);
+      }
+      return "新会话";
+    },
+
+    /* =========================
+       DB：保存当前会话（创建/更新）
+    ========================= */
+    async saveCurrentChat({ forceTitle = false } = {}) {
+      if (!this.messages.length) return;
+
+      if (this.saving) {
+        this.pendingSave = true;
+        return;
+      }
+      this.saving = true;
+
+      try {
+        // 1) title：有就用；没有/forceTitle 就生成
+        let currentTitle = "新会话";
+        const local = this.chats.find((c) => c.id === this.activeChatId);
+        if (local?.title) currentTitle = local.title;
+
+        if (!currentTitle || currentTitle === "新会话" || forceTitle) {
+          currentTitle = await this.genTitleByMessages(this.messages);
+        }
+
+        // 2) 创建 or 更新
+        if (!this.activeChatId) {
+          const resp = await fetch(`${this.apiBase}/api/chats`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: currentTitle,
+              messages: this.messages,
+            }),
+          });
+          const data = await resp.json();
+          if (resp.ok && data.id) {
+            this.activeChatId = data.id;
+          } else {
+            return;
+          }
+        } else {
+          await fetch(`${this.apiBase}/api/chats/${this.activeChatId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: currentTitle,
+              messages: this.messages,
+            }),
+          });
+        }
+
+        // 3) 刷新左侧
+        await this.loadChats();
+      } catch (e) {
+        // console.warn("saveCurrentChat failed:", e);
+      } finally {
+        this.saving = false;
+        if (this.pendingSave) {
+          this.pendingSave = false;
+          this.saveCurrentChat();
+        }
+      }
+    },
+
+    /* =========================
+       点击左侧历史：加载会话详情
+    ========================= */
+    async selectChat(chat) {
+      try {
+        const resp = await fetch(`${this.apiBase}/api/chats/${chat.id}`);
+        const data = await resp.json();
+        if (!resp.ok) return;
+
+        this.activeChatId = data.id;
+        this.messages = Array.isArray(data.messages)
+          ? data.messages.map((m) => ({ ...m }))
+          : [];
+        this.userMessage = "";
+        this.isNewChat = this.messages.length === 0;
+
+        this.$nextTick(() => {
+          const el = this.$el.querySelector(".chat-history");
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      } catch (e) {
+        // console.warn("selectChat failed:", e);
+      }
+    },
+
+    /* =========================
+       新聊天：先保存当前，再清空
+    ========================= */
+    async startNewChat() {
+      if (this.messages.length) {
+        await this.saveCurrentChat({ forceTitle: true });
+      }
+
+      this.activeChatId = null;
+      this.isNewChat = true;
+      this.messages = [];
+      this.userMessage = "";
+    },
+
+    /* =========================
+       发送消息：走 /api/agent
+    ========================= */
+    async sendMessage() {
+      if (!this.userMessage.trim()) return;
+
+      const text = this.userMessage;
+      this.messages.push({ text, from: "user" });
+      this.userMessage = "";
+      this.isNewChat = false;
+
+      try {
+        const resp = await fetch(`${this.apiBase}/api/agent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: this.messages }),
+        });
+
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          this.messages.push({
+            text: data?.error ? `后端错误：${data.error}` : "后端错误：请求失败",
+            from: "agent",
+          });
+        } else {
+          if (data.reply) {
+            this.messages.push({ text: data.reply || "（无回复）", from: "agent" });
+          }
+
+          if (data.tool && data.data) {
+            let rendered = "";
+
+            if (
+              (data.tool === "mail.listTodayInbox" || data.tool === "mail.listInbox") &&
+              Array.isArray(data.data)
+            ) {
+              const rangeText =
+                (data.params?.since || data.params?.before)
+                  ? `（${data.params.since || "最早"} ~ ${data.params.before || "至今"}）`
+                  : "";
+
+              const header =
+                data.tool === "mail.listTodayInbox"
+                  ? "今天收件箱邮件如下：\n"
+                  : `查询结果如下${rangeText}：\n`;
+
+              if (data.data.length === 0) {
+                rendered = header + "（暂无邮件）";
+              } else {
+                rendered =
+                  header +
+                  data.data
+                    .map((m, i) => {
+                      const date = m.date ? new Date(m.date).toLocaleString() : "";
+                      const subject = (m.subject || "无主题").trim();
+                      const from = (m.from || "未知").trim();
+                      const snippet = (m.snippet || "").trim();
+                      return `${i + 1}. 【${subject}】 发件人：${from} 时间：${date} 摘要：${snippet}`;
+                    })
+                    .join("\n");
+              }
+            }
+
+            if (data.tool === "mail.send") {
+              rendered = data.data?.ok
+                ? `邮件已发送成功 ✅\nmessageId：${data.data.messageId || ""}`
+                : `发送失败：${JSON.stringify(data.data)}`;
+            }
+
+            if (rendered) {
+              this.messages.push({ text: rendered, from: "agent" });
+            }
+          }
+        }
+      } catch (e) {
+        this.messages.push({
+          text: `后端连接失败：请确认 backend 已启动（${this.apiBase}）`,
+          from: "agent",
+        });
+      }
+
+      this.$nextTick(() => {
+        const el = this.$el.querySelector(".chat-history");
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+
+      // ✅ 每次发完都保存（刷新不丢）
+      await this.saveCurrentChat();
+    },
+  },
+};
+</script>
+
+
+<style scoped>
+/* 关键：让页面不整体滚动 */
+#app,
+.container {
+  height: 100vh;
+}
+.container {
+  display: flex;
+  width: 100%;
+  overflow: hidden;
+  background-color: #e6ede9;
+}
+
+/* 左侧边栏：独立滚动 */
+.sidebar {
+  width: 300px;
+  background-color: #e4f1eb;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.new-chat-btn {
+  background-color: #4c7854;
+  border: none;
+  padding: 12px;
+  width: 100%;
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+
+.history-title {
+  font-weight: 700;
+  margin: 6px 0 10px;
+}
+
+.history-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.history-item {
+  padding: 10px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.history-item:hover {
+  background: rgba(255, 255, 255, 0.55);
+}
+.history-item.active {
+  background: rgba(255, 255, 255, 0.75);
+  outline: 2px solid rgba(76, 120, 84, 0.25);
+}
+.history-item-text {
+  margin: 0;
+}
+
+/* 右侧聊天区域 */
+.chat-area {
+  flex: 1;
+  position: relative;
+  background-color: #ffffff;
+  overflow: hidden;
+  padding: 20px 20px 0;
+}
+
+/* 聊天展示框：独立滚动 */
+.chat-history {
+  height: calc(100vh - 20px - 110px);
+  overflow-y: auto;
+  padding: 18px 0 18px;
+}
+
+/* 中间内容区域 */
+.chat-inner {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: 0 6px;
+}
+
+/* 欢迎语 */
+.welcome-message {
+  font-size: 16px;
+  color: #555;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin: 6px 0 18px;
+}
+
+/* 每条消息一行：根据 user/agent 控制左右 */
+.message-row {
+  display: flex;
+  margin: 10px 0;
+}
+.message-row.user {
+  justify-content: flex-end;
+}
+.message-row.agent {
+  justify-content: flex-start;
+}
+
+/* 气泡 */
+.bubble {
+  max-width: 70%;
+  padding: 12px 14px;
+  border-radius: 18px;
+  line-height: 1.5;
+  font-size: 14px;
+  word-break: break-word;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+  white-space: pre-wrap; /* ✅ 让 \n 换行生效 */
+}
+
+.message-row.user .bubble {
+  background: #dff2ff;
+  border: 1px solid rgba(0,0,0,0.06);
+}
+.message-row.agent .bubble {
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,0.06);
+}
+
+/* 输入区：固定在右侧区域底部 */
+.input-area {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.input-wrap {
+  width: min(760px, 100%);
+  position: relative;
+  padding: 0 6px;
+  pointer-events: auto;
+}
+
+.input-box {
+  width: 100%;
+  height: 92px;
+  padding: 12px 56px 12px 14px;
+  border: 1px solid rgba(0,0,0,0.15);
+  border-radius: 18px;
+  font-size: 14px;
+  background: #fff;
+  box-sizing: border-box;
+  outline: none;
+
+  resize: none;
+  line-height: 1.5;
+  vertical-align: top;
+}
+
+.input-box::placeholder {
+  color: rgba(0,0,0,0.45);
+}
+
+.send-btn {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+
+  border: none;
+  cursor: pointer;
+
+  background: #4c7854;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+}
+
+.send-btn:active {
+  transform: translateY(1px);
+}
+
+.send-icon {
+  width: 22px;
+  height: 22px;
+  fill: #fff;
+}
+</style>
+
+<style>
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+</style>
