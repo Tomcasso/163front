@@ -1,0 +1,180 @@
+import { ImapFlow } from "imapflow";
+import { simpleParser } from "mailparser";
+import nodemailer from "nodemailer";
+
+const IMAP_HOST = "imap.163.com";
+const IMAP_PORT = 993;
+const SMTP_HOST = "smtp.163.com";
+const SMTP_PORT = 465;
+
+// ✅ 只做“格式校验 + 转换”，不做“理解”
+// - 输入必须 yyyy-mm-dd
+// - 按中国时区 +08:00 的 00:00 构造 Date，避免你机器在美国导致偏移
+function ymdToDateCN(ymd) {
+  if (!ymd) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+  // 固定用 +08:00 的当天 00:00:00
+  const d = new Date(`${ymd}T00:00:00+08:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function pickBestDate(parsed, envelope) {
+  // parsed.date 通常最可靠；没有就用 envelope.date
+  const d = parsed?.date || envelope?.date || null;
+  return d ? new Date(d) : null;
+}
+
+export const tools = {
+  "mail.listInbox": {
+    description:
+      "按时间范围列出收件箱邮件摘要（since/before 为 yyyy-mm-dd，可选；before 不包含当天；支持 from 发件人过滤）",
+    parameters: {
+      since: { type: "string", optional: true }, // yyyy-mm-dd
+      before: { type: "string", optional: true }, // yyyy-mm-dd
+      limit: { type: "number", default: 10 },
+      unreadOnly: { type: "boolean", default: false },
+      from: { type: "string", optional: true }, // ✅ 新增：发件人过滤（邮箱或名称关键字）
+    },
+
+    async execute({ since, before, limit = 10, unreadOnly = false, from }) {
+      const EMAIL_USER = process.env.EMAIL_USER;
+      const EMAIL_PASS = process.env.EMAIL_PASS;
+
+      if (!EMAIL_USER || !EMAIL_PASS) {
+        throw new Error(
+          "邮箱环境变量缺失：请检查 EMAIL_USER / EMAIL_PASS 是否在 backend/.env 中"
+        );
+      }
+
+      // ✅ 不理解日期，只校验格式
+      const sinceDate = since ? ymdToDateCN(since) : null;
+      const beforeDate = before ? ymdToDateCN(before) : null;
+
+      if (since && !sinceDate) throw new Error("参数错误：since 必须为 yyyy-mm-dd");
+      if (before && !beforeDate) throw new Error("参数错误：before 必须为 yyyy-mm-dd");
+      if (sinceDate && beforeDate && sinceDate >= beforeDate) {
+        throw new Error("参数错误：since 必须早于 before（before 不包含当天）");
+      }
+
+      // ✅ 发件人过滤：只做基本清洗，不做理解
+      const fromStr =
+        typeof from === "string" && from.trim() ? from.trim() : null;
+
+      const client = new ImapFlow({
+        host: IMAP_HOST,
+        port: IMAP_PORT,
+        secure: true,
+        auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+        authTimeout: 10000,
+      });
+
+      await client.connect();
+      await client.mailboxOpen("INBOX");
+
+      const query = {};
+      if (sinceDate) query.since = sinceDate;
+      if (beforeDate) query.before = beforeDate;
+      if (unreadOnly) query.seen = false;
+
+      // ✅ 核心新增：按 From 字段过滤
+      if (fromStr) query.from = fromStr;
+
+      const uids = await client.search(query);
+
+      // ✅ 搜索结果可能很多，只取最后 limit 封
+      const latest = uids.slice(-limit);
+
+      const mails = [];
+      for await (const msg of client.fetch(latest, {
+        envelope: true,
+        uid: true,
+        source: true,
+        flags: true,
+      })) {
+        const parsed = await simpleParser(msg.source);
+        const bestDate = pickBestDate(parsed, msg.envelope);
+
+        mails.push({
+          uid: msg.uid,
+          from: parsed.from?.text || "(未知发件人)",
+          subject: parsed.subject || "(无主题)",
+          // ✅ 统一返回 ISO 字符串，前端怎么显示都不会“看起来乱”
+          date: bestDate ? bestDate.toISOString() : null,
+          unread: Array.isArray(msg.flags)
+            ? !msg.flags.includes("\\Seen")
+            : null,
+          snippet: (parsed.text || "").replace(/\s+/g, " ").slice(0, 160),
+        });
+      }
+
+      await client.logout();
+
+      // ✅ 按时间从新到旧（你前端显示更自然）
+      mails.sort((a, b) => {
+        const ta = a.date ? Date.parse(a.date) : 0;
+        const tb = b.date ? Date.parse(b.date) : 0;
+        return tb - ta;
+      });
+
+      return mails;
+    },
+  },
+
+  "mail.listTodayInbox": {
+    description: "（兼容旧版本）列出今日的收件箱邮件摘要",
+    parameters: { limit: { type: "number", default: 10 } },
+    async execute({ limit = 10 }) {
+      // ✅ 今天范围仍然不“理解”，只是固定 since=今天（按 +08:00）
+      const nowCN = new Date(
+        new Date().toLocaleString("en-US", { timeZone: "Asia/Shanghai" })
+      );
+      const y = nowCN.getFullYear();
+      const m = String(nowCN.getMonth() + 1).padStart(2, "0");
+      const d = String(nowCN.getDate()).padStart(2, "0");
+      const since = `${y}-${m}-${d}`;
+
+      return await tools["mail.listInbox"].execute({
+        since,
+        limit,
+        unreadOnly: false,
+      });
+    },
+  },
+
+  "mail.send": {
+    description: "发送邮件（需提供收件人、主题、正文）",
+    parameters: {
+      to: { type: "string" },
+      subject: { type: "string" },
+      text: { type: "string" },
+    },
+
+    async execute({ to, subject, text }) {
+      const EMAIL_USER = process.env.EMAIL_USER;
+      const EMAIL_PASS = process.env.EMAIL_PASS;
+
+      if (!EMAIL_USER || !EMAIL_PASS) {
+        throw new Error(
+          "邮箱环境变量缺失：请检查 EMAIL_USER / EMAIL_PASS 是否在 backend/.env 中"
+        );
+      }
+
+      const transporter = nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: true,
+        auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+      });
+
+      const info = await transporter.sendMail({
+        from: EMAIL_USER,
+        to,
+        subject,
+        text,
+      });
+
+      return { ok: true, messageId: info.messageId };
+    },
+  },
+};
